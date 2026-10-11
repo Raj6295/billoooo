@@ -8,7 +8,15 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors import UserNotParticipant
 from config import *
-from db import add_file, search_files, file_count, get_file_by_id, files
+from db import (
+    add_file,
+    search_files,
+    file_count,
+    get_file_by_id,
+    files,
+    get_channel_backfill_cursor,
+    set_channel_backfill_cursor,
+)
 from aiohttp import web   # ✅ for dummy web server
 
 
@@ -48,9 +56,19 @@ async def auto_delete_message(message, delay=30):
     filters.channel & filters.chat(FILES_CHANNEL_ID) & (filters.document | filters.video | filters.audio)
 )
 async def index_file(client, message):
+    file_info = index_message(message)
+    if file_info:
+        logging.info("Indexed file from channel update: %s", message.id)
+        await app.send_message(
+            LOG_CHANNEL_ID,
+            f"Indexed file: {file_info['file_name']}",
+        )
+
+
+def index_message(message):
     media = message.document or message.video or message.audio
     if not media:
-        return
+        return None
     media_type = ("document" if message.document else "video" if message.video else "audio")
     file_info = {
         "file_id": media.file_id,
@@ -60,8 +78,12 @@ async def index_file(client, message):
         "channel_id": message.chat.id,
         "file_type": media_type
     }
-    add_file(file_info)
-    await app.send_message(LOG_CHANNEL_ID, f"Indexed file: {file_info.get('file_name', '')}")
+    try:
+        add_file(file_info)
+    except Exception:
+        logging.exception("Failed to index file from channel message %s", message.id)
+        raise
+    return file_info
 
 
 @app.on_message(
@@ -262,6 +284,33 @@ async def run_web_server():
     logging.info(f"🌐 Web server running on port {port}")
 
 
+async def backfill_files_channel():
+    member = await app.get_chat_member(FILES_CHANNEL_ID, app.me.id)
+    if member.status not in ("administrator", "creator"):
+        raise RuntimeError(
+            f"Bot must be an administrator in files channel {FILES_CHANNEL_ID}; "
+            f"current status is {member.status!s}"
+        )
+
+    cursor = get_channel_backfill_cursor(FILES_CHANNEL_ID)
+    newest_message_id = cursor
+    indexed_count = 0
+    async for message in app.get_chat_history(FILES_CHANNEL_ID):
+        if message.id <= cursor:
+            break
+        newest_message_id = max(newest_message_id, message.id)
+        if index_message(message):
+            indexed_count += 1
+    set_channel_backfill_cursor(FILES_CHANNEL_ID, newest_message_id)
+
+    logging.info(
+        "Channel backfill complete: indexed %d files after message %d through message %d",
+        indexed_count,
+        cursor,
+        newest_message_id,
+    )
+
+
 async def main():
     global bot_connected
 
@@ -270,6 +319,7 @@ async def main():
     bot_connected = True
     logging.info("Telegram bot connected as @%s", app.me.username)
     try:
+        await backfill_files_channel()
         await idle()
     finally:
         bot_connected = False
