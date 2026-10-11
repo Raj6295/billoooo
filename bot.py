@@ -4,7 +4,7 @@ import os
 
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors import UserNotParticipant
 from config import *
@@ -14,6 +14,7 @@ from aiohttp import web   # ✅ for dummy web server
 
 logging.basicConfig(level=logging.INFO)
 app = Client("autofilter-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot_connected = False
 
 
 RESULTS_PER_PAGE = 10
@@ -246,7 +247,9 @@ async def help_handler(client, message):
 
 # ✅ Dummy web server for Render
 async def handle_root(request):
-    return web.Response(text="✅ Telegram AutoFilter Bot is running!")
+    if bot_connected:
+        return web.Response(text="Telegram AutoFilter Bot is connected.")
+    return web.Response(text="Web server is running, but the Telegram bot is not connected.")
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8080))  # Render provides PORT
@@ -259,8 +262,20 @@ async def run_web_server():
     logging.info(f"🌐 Web server running on port {port}")
 
 
-# ✅ Run both bot & web server
+async def main():
+    global bot_connected
+
+    await run_web_server()
+    await app.start()
+    bot_connected = True
+    logging.info("Telegram bot connected as @%s", app.me.username)
+    try:
+        await idle()
+    finally:
+        bot_connected = False
+        await app.stop()
+
+
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.create_task(run_web_server())   # start dummy server
-    app.run()  # start Telegram bot
+    loop.run_until_complete(main())
